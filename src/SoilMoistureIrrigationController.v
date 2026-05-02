@@ -1,27 +1,45 @@
-module moisture_irrigation (
-    input wire clk,
-    input wire rst, // Synchronous, active-high reset
-    input wire comp0,
-    input wire comp1,
-    output reg pump,
-    output reg invalid_flag
+module tt_um_moisture_irrigation (
+    input  wire [7:0] ui_in,    // ui_in[0]=comp0, ui_in[1]=comp1
+    output wire [7:0] uo_out,   // uo_out[0]=pump, uo_out[1]=invalid_flag
+    input  wire [7:0] uio_in,   // not used
+    output wire [7:0] uio_out,  // not used
+    output wire [7:0] uio_oe,   // set to 0 (all bidirectional as input)
+    input  wire       ena,      // not used
+    input  wire       clk,      // clock
+    input  wire       rst_n     // active-low reset (TinyTapeout standard)
 );
 
+    // Map inputs
+    wire comp0 = ui_in[0];
+    wire comp1 = ui_in[1];
+    wire rst   = ~rst_n;        // Convert active-low to active-high
+
+    // Internal signals
+    wire pump;
+    wire invalid_flag;
+
+    // Map outputs
+    assign uo_out[0] = pump;
+    assign uo_out[1] = invalid_flag;
+    assign uo_out[7:2] = 6'b0;  // unused outputs set to 0
+    assign uio_out = 8'b0;
+    assign uio_oe  = 8'b0;
+
     // ─── Comparator Encoding ───────────────────────────────────────────
-    // {comp1, comp0} = 2'b00 → V < Vref_low → DRY → IRRIGATE
-    // {comp1, comp0} = 2'b01 → Vref_low < V < Vref_high → MILD → IDLE
-    // {comp1, comp0} = 2'b11 → V > Vref_high → WET → SATURATED
-    // {comp1, comp0} = 2'b10 → INVALID (impossible comparator state)
+    // {comp1, comp0} = 2'b00 → DRY   → IRRIGATE
+    // {comp1, comp0} = 2'b01 → MILD  → IDLE
+    // {comp1, comp0} = 2'b11 → WET   → SATURATED
+    // {comp1, comp0} = 2'b10 → INVALID
     // ──────────────────────────────────────────────────────────────────
 
     wire [1:0] moisture_content;
     assign moisture_content = {comp1, comp0};
 
     // State encoding
-    localparam [1:0] IDLE = 2'b00,
-                     IRRIGATE = 2'b01,
+    localparam [1:0] IDLE      = 2'b00,
+                     IRRIGATE  = 2'b01,
                      SATURATED = 2'b10,
-                     INVALID = 2'b11;
+                     INVALID   = 2'b11;
 
     reg [1:0] current_state, next_state;
 
@@ -35,67 +53,67 @@ module moisture_irrigation (
 
     // ─── Next State Logic ──────────────────────────────────────────────
     always @(*) begin
-        // Default: hold current state
         next_state = current_state;
 
         case (current_state)
-
-            
-            IDLE: begin 
-                if (invalid) next_state = INVALID;
-                else if (moisture_content == 2'b00) next_state = IRRIGATE;
-                else if (moisture_content == 2'b01) next_state = IDLE;
-                else next_state = SATURATED;
+            IDLE: begin
+                case (moisture_content)
+                    2'b10:   next_state = INVALID;
+                    2'b00:   next_state = IRRIGATE;
+                    2'b01:   next_state = IDLE;
+                    2'b11:   next_state = SATURATED;
+                    default: next_state = INVALID;
+                endcase
             end
-    
-            
 
             IRRIGATE: begin
                 case (moisture_content)
-                    2'b10: next_state = INVALID; // Invalid comparator
-                    2'b00: next_state = IRRIGATE; // Still dry → keep pumping
-                    2'b01: next_state = IDLE; // Reached mild → idle
-                    2'b11: next_state = SATURATED; // Overshot → saturated
+                    2'b10:   next_state = INVALID;
+                    2'b00:   next_state = IRRIGATE;
+                    2'b01:   next_state = IDLE;
+                    2'b11:   next_state = SATURATED;
                     default: next_state = INVALID;
                 endcase
             end
 
             SATURATED: begin
                 case (moisture_content)
-                    2'b10: next_state = INVALID; // Invalid comparator
-                    2'b11: next_state = SATURATED; // Still wet → stay
-                    2'b01: next_state = IDLE; // Dried to mild → idle
-                    2'b00: next_state = IRRIGATE; // Dried to low → irrigate
+                    2'b10:   next_state = INVALID;
+                    2'b11:   next_state = SATURATED;
+                    2'b01:   next_state = IDLE;
+                    2'b00:   next_state = IRRIGATE;
                     default: next_state = INVALID;
                 endcase
             end
 
             INVALID: begin
-                // Only escape on reset; hold until RST clears the fault
                 if (moisture_content != 2'b10)
-                    next_state = IDLE; // Comparators back to valid → recover
+                    next_state = IDLE;
                 else
                     next_state = INVALID;
             end
 
             default: next_state = IDLE;
-
         endcase
     end
 
     // ─── Output Logic (Moore) ─────────────────────────────────────────
+    reg pump_reg, invalid_flag_reg;
+
     always @(*) begin
-        // Safe defaults
-        pump = 1'b0;
-        invalid_flag = 1'b0;
+        pump_reg         = 1'b0;
+        invalid_flag_reg = 1'b0;
 
         case (current_state)
-            IDLE: begin pump = 1'b0; invalid_flag = 1'b0; end
-            IRRIGATE: begin pump = 1'b1; invalid_flag = 1'b0; end // Pump ON
-            SATURATED: begin pump = 1'b0; invalid_flag = 1'b0; end // Pump OFF
-            INVALID: begin pump = 1'b0; invalid_flag = 1'b1; end // Flag fault
-            default: begin pump = 1'b0; invalid_flag = 1'b0; end
+            IDLE:      begin pump_reg = 1'b0; invalid_flag_reg = 1'b0; end
+            IRRIGATE:  begin pump_reg = 1'b1; invalid_flag_reg = 1'b0; end
+            SATURATED: begin pump_reg = 1'b0; invalid_flag_reg = 1'b0; end
+            INVALID:   begin pump_reg = 1'b0; invalid_flag_reg = 1'b1; end
+            default:   begin pump_reg = 1'b0; invalid_flag_reg = 1'b0; end
         endcase
     end
+
+    assign pump         = pump_reg;
+    assign invalid_flag = invalid_flag_reg;
 
 endmodule
